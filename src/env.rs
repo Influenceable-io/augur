@@ -5,10 +5,12 @@ use anyhow::Result;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
 
+use serde_json::Value;
+
 use crate::agent::graph::AgentGraph;
 use crate::channel::Channel;
 use crate::clock::Clock;
-use crate::env_action::Action;
+use crate::env_action::{Action, ManualAction};
 use crate::platform::{Platform, PlatformConfig};
 use crate::types::*;
 use crate::PlatformOrDefault;
@@ -159,17 +161,19 @@ impl AugurEnv {
         for (agent_id, action) in actions {
             let semaphore = self.llm_semaphore.clone();
             let agent_graph = self.agent_graph.clone();
-            let _channel = self.channel.clone();
+            let channel = self.channel.clone();
 
             tasks.push(tokio::spawn(async move {
                 match action {
                     Action::Manual(manual) => {
-                        let graph = agent_graph.read().await;
-                        if let Some(agent) = graph.get_agent(agent_id) {
-                            agent
-                                .perform_action_by_data(&manual.action_type.to_string(), serde_json::to_value(&manual.action_args).unwrap_or_default())
-                                .await;
-                        }
+                        // Route manual actions through the env's channel so the
+                        // platform event loop processes them, matching how
+                        // reset() dispatches sign-up and follow actions.
+                        let msg = manual_action_to_message(&manual);
+                        let msg_id = channel
+                            .write_to_receive_queue(agent_id, msg, manual.action_type)
+                            .await;
+                        let _ = channel.read_from_send_queue(msg_id).await;
                     }
                     Action::Llm(_) => {
                         let _permit = semaphore.acquire().await.unwrap();
@@ -189,12 +193,11 @@ impl AugurEnv {
                             // Process each sub-action sequentially
                             match sub {
                                 Action::Manual(manual) => {
-                                    let graph = agent_graph.read().await;
-                                    if let Some(agent) = graph.get_agent(agent_id) {
-                                        agent
-                                            .perform_action_by_data(&manual.action_type.to_string(), serde_json::to_value(&manual.action_args).unwrap_or_default())
-                                            .await;
-                                    }
+                                    let msg = manual_action_to_message(&manual);
+                                    let msg_id = channel
+                                        .write_to_receive_queue(agent_id, msg, manual.action_type)
+                                        .await;
+                                    let _ = channel.read_from_send_queue(msg_id).await;
                                 }
                                 Action::Llm(_) => {
                                     let _permit = semaphore.acquire().await.unwrap();
@@ -245,5 +248,85 @@ impl AugurEnv {
 
         tracing::info!("Simulation closed");
         Ok(())
+    }
+}
+
+/// Convert a ManualAction's HashMap args into the Value format the platform
+/// dispatch expects.
+///
+/// The platform handler for each action type expects a specific JSON shape
+/// (e.g., CreatePost expects a plain string, LikePost expects a plain integer).
+/// This mirrors the extraction logic in SocialAction::perform_action_by_name.
+fn manual_action_to_message(manual: &ManualAction) -> Value {
+    let args = &manual.action_args;
+    match manual.action_type {
+        ActionType::CreatePost => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            serde_json::json!(content)
+        }
+        ActionType::Repost
+        | ActionType::LikePost
+        | ActionType::UnlikePost
+        | ActionType::DislikePost
+        | ActionType::UndoDislikePost => {
+            let post_id = args
+                .get("post_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            serde_json::json!(post_id)
+        }
+        ActionType::LikeComment
+        | ActionType::UnlikeComment
+        | ActionType::DislikeComment
+        | ActionType::UndoDislikeComment => {
+            let comment_id = args
+                .get("comment_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            serde_json::json!(comment_id)
+        }
+        ActionType::Follow | ActionType::Unfollow => {
+            let followee_id = args
+                .get("followee_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            serde_json::json!(followee_id)
+        }
+        ActionType::Mute | ActionType::Unmute => {
+            let mutee_id = args
+                .get("mutee_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            serde_json::json!(mutee_id)
+        }
+        ActionType::SearchPosts | ActionType::SearchUser => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            serde_json::json!(query)
+        }
+        ActionType::CreateGroup => {
+            let name = args
+                .get("group_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            serde_json::json!(name)
+        }
+        ActionType::JoinGroup | ActionType::LeaveGroup => {
+            let group_id = args
+                .get("group_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            serde_json::json!(group_id)
+        }
+        // For complex actions (QuotePost, CreateComment, SignUp, SendToGroup,
+        // ReportPost, PurchaseProduct, Interview) and no-arg actions (Refresh,
+        // Trend, ListenFromGroup, DoNothing, Exit, UpdateRecTable), pass
+        // the full args object through.
+        _ => serde_json::to_value(args).unwrap_or_default(),
     }
 }
