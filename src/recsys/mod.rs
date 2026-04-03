@@ -1,3 +1,4 @@
+pub mod embeddings;
 pub mod random;
 pub mod reddit;
 pub mod twitter;
@@ -47,7 +48,7 @@ pub fn update_rec_table(conn: &Connection, recsys_type: RecsysType, max_rec_post
     // Compute recommendations: Vec<(user_id, post_id)>
     let recommendations = match recsys_type {
         RecsysType::Random => random::recommend(&user_table, &post_table, max_rec_post_len),
-        RecsysType::Reddit => reddit::recommend(&post_table, max_rec_post_len),
+        RecsysType::Reddit => reddit::recommend(&user_table, &post_table, max_rec_post_len),
         RecsysType::Twitter => twitter::recommend(&user_table, &post_table, &trace_table, max_rec_post_len),
         RecsysType::Twhin => twhin::recommend(&user_table, &post_table, &trace_table, max_rec_post_len),
     };

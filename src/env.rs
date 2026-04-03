@@ -72,13 +72,75 @@ impl AugurEnv {
     }
 
     /// Start the platform event loop and register agents.
+    ///
+    /// This mirrors OASIS's reset():
+    /// 1. Start the platform event loop
+    /// 2. Sign up all agents on the platform
+    /// 3. Insert follow relationships from the agent graph
+    /// 4. Insert previous posts from agent profiles
     pub async fn reset(&mut self) -> Result<()> {
         let platform = self.platform.clone();
         self.platform_task = Some(tokio::spawn(async move {
             platform.running().await;
         }));
 
-        // TODO: Generate custom agents (sign_up, insert follows, insert posts)
+        // Sign up all agents
+        let graph = self.agent_graph.read().await;
+        for (agent_id, agent) in graph.get_agents() {
+            let user_name = agent.user_info.user_name.as_deref().unwrap_or("unknown");
+            let name = agent.user_info.name.as_deref().unwrap_or("unknown");
+            let bio = agent.user_info.description.as_deref().unwrap_or("");
+
+            let msg_id = self
+                .channel
+                .write_to_receive_queue(
+                    agent_id,
+                    serde_json::json!({"user_name": user_name, "name": name, "bio": bio}),
+                    ActionType::SignUp,
+                )
+                .await;
+            let _ = self.channel.read_from_send_queue(msg_id).await;
+        }
+
+        // Insert follow relationships from agent graph edges
+        for (from, to) in graph.get_edges() {
+            // In OASIS, followee_id is the user_id (1-indexed autoincrement)
+            // agent_id 0 -> user_id 1, agent_id 1 -> user_id 2, etc.
+            let followee_user_id = to + 1;
+            let msg_id = self
+                .channel
+                .write_to_receive_queue(
+                    from,
+                    serde_json::json!(followee_user_id),
+                    ActionType::Follow,
+                )
+                .await;
+            let _ = self.channel.read_from_send_queue(msg_id).await;
+        }
+
+        // Insert previous posts from agent profiles
+        for (agent_id, agent) in graph.get_agents() {
+            if let Some(profile) = &agent.user_info.profile {
+                if let Some(tweets_val) = profile.get("previous_tweets") {
+                    let tweets_str = tweets_val.as_str().unwrap_or("");
+                    for tweet in tweets_str
+                        .split(';')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
+                        let msg_id = self
+                            .channel
+                            .write_to_receive_queue(
+                                agent_id,
+                                serde_json::json!(tweet),
+                                ActionType::CreatePost,
+                            )
+                            .await;
+                        let _ = self.channel.read_from_send_queue(msg_id).await;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

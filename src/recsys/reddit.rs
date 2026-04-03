@@ -1,12 +1,15 @@
 use std::cmp::Ordering;
 
-use super::PostRow;
+use super::{PostRow, UserRow};
 
 /// Reddit hot-score algorithm.
 ///
 /// Formula: `sign * log(max(|s|, 1), 10) + seconds / 45000`
 /// where `s = num_likes - num_dislikes`
+///
+/// Reddit doesn't personalize — same top-k posts for all users.
 pub fn recommend(
+    user_table: &[UserRow],
     post_table: &[PostRow],
     max_rec_post_len: usize,
 ) -> Vec<(i64, i64)> {
@@ -21,17 +24,26 @@ pub fn recommend(
 
     // Sort by score descending, take top-k
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-    let top_k: Vec<i64> = scored.iter().take(max_rec_post_len).map(|(id, _)| *id).collect();
+    let top_k: Vec<i64> = scored
+        .iter()
+        .take(max_rec_post_len)
+        .map(|(id, _)| *id)
+        .collect();
 
-    // Same recommendations for all users (Reddit doesn't personalize)
-    // Return empty user_id=0 as placeholder; caller maps to all users
-    top_k.iter().map(|&post_id| (0_i64, post_id)).collect()
+    // Broadcast same top-k to all users
+    let mut recommendations = Vec::new();
+    for user in user_table {
+        for &post_id in &top_k {
+            recommendations.push((user.user_id, post_id));
+        }
+    }
+    recommendations
 }
 
 /// Calculate Reddit's hot score.
 ///
 /// Matches OASIS's implementation exactly:
-/// ```
+/// ```text
 /// s = num_likes - num_dislikes
 /// order = log(max(abs(s), 1), 10)
 /// sign = 1 if s > 0, -1 if s < 0, 0 if s == 0
