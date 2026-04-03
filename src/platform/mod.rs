@@ -11,7 +11,7 @@ use crate::channel::Channel;
 use crate::clock::Clock;
 use crate::db;
 use crate::db::queries;
-use crate::recsys;
+use crate::recsys::{self, TRACE_LIKE_POST_PREFIX};
 use crate::types::*;
 
 pub use config::PlatformConfig;
@@ -330,7 +330,7 @@ impl Platform {
         ) {
             Ok(_) => {
                 let post_id = db.last_insert_rowid();
-                let _ = queries::record_trace(&db, user_id, "create_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "create_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "post_id": post_id }))
             }
             Err(e) => ActionResult::fail(&format!("create_post failed: {}", e)),
@@ -477,7 +477,7 @@ impl Platform {
                     "UPDATE post SET num_likes = num_likes + 1 WHERE post_id = ?1",
                     params![post_id],
                 );
-                let _ = queries::record_trace(&db, user_id, "like_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "like_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "like_id": like_id }))
             }
             Err(e) => ActionResult::fail(&format!("like_post failed: {}", e)),
@@ -507,7 +507,7 @@ impl Platform {
                     "UPDATE post SET num_likes = num_likes - 1 WHERE post_id = ?1",
                     params![post_id],
                 );
-                let _ = queries::record_trace(&db, user_id, "unlike_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "unlike_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "like_id": lid }))
             }
             None => ActionResult::fail("not liked"),
@@ -559,7 +559,7 @@ impl Platform {
                     "UPDATE post SET num_dislikes = num_dislikes + 1 WHERE post_id = ?1",
                     params![post_id],
                 );
-                let _ = queries::record_trace(&db, user_id, "dislike_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "dislike_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "dislike_id": dislike_id }))
             }
             Err(e) => ActionResult::fail(&format!("dislike_post failed: {}", e)),
@@ -589,7 +589,7 @@ impl Platform {
                     "UPDATE post SET num_dislikes = num_dislikes - 1 WHERE post_id = ?1",
                     params![post_id],
                 );
-                let _ = queries::record_trace(&db, user_id, "undo_dislike_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "undo_dislike_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "dislike_id": did }))
             }
             None => ActionResult::fail("not disliked"),
@@ -749,54 +749,54 @@ impl Platform {
         let now = self.now_str();
 
         // Get recommended posts from rec table
-        let mut rec_posts: Vec<Value> = {
-            let mut stmt = db
-                .prepare(
-                    "SELECT p.post_id, p.user_id, p.content, p.created_at, p.num_likes, p.num_dislikes, p.num_shares \
-                     FROM rec r JOIN post p ON r.post_id = p.post_id \
-                     WHERE r.user_id = ?1 LIMIT ?2",
-                )
-                .unwrap_or_else(|_| panic!("Failed to prepare refresh query"));
-            stmt.query_map(params![user_id, self.config.refresh_rec_post_count], |row| {
-                Ok(json!({
-                    "post_id": row.get::<_, i64>(0)?,
-                    "user_id": row.get::<_, i64>(1)?,
-                    "content": row.get::<_, String>(2)?,
-                    "created_at": row.get::<_, String>(3)?,
-                    "num_likes": row.get::<_, i64>(4)?,
-                    "num_dislikes": row.get::<_, i64>(5)?,
-                    "num_shares": row.get::<_, i64>(6)?,
-                }))
-            })
-            .unwrap_or_else(|_| panic!("Failed to query rec posts"))
-            .filter_map(|r| r.ok())
-            .collect()
+        let mut rec_posts: Vec<Value> = match db.prepare(
+            "SELECT p.post_id, p.user_id, p.content, p.created_at, p.num_likes, p.num_dislikes, p.num_shares \
+             FROM rec r JOIN post p ON r.post_id = p.post_id \
+             WHERE r.user_id = ?1 LIMIT ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(params![user_id, self.config.refresh_rec_post_count], |row| {
+                    Ok(json!({
+                        "post_id": row.get::<_, i64>(0)?,
+                        "user_id": row.get::<_, i64>(1)?,
+                        "content": row.get::<_, String>(2)?,
+                        "created_at": row.get::<_, String>(3)?,
+                        "num_likes": row.get::<_, i64>(4)?,
+                        "num_dislikes": row.get::<_, i64>(5)?,
+                        "num_shares": row.get::<_, i64>(6)?,
+                    }))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => {
+                return ActionResult::fail(&format!("refresh rec query failed: {}", e));
+            }
         };
 
         // Get posts from followed users
-        let following_posts: Vec<Value> = {
-            let mut stmt = db
-                .prepare(
-                    "SELECT p.post_id, p.user_id, p.content, p.created_at, p.num_likes, p.num_dislikes, p.num_shares \
-                     FROM post p JOIN follow f ON p.user_id = f.followee_id \
-                     WHERE f.follower_id = ?1 \
-                     ORDER BY p.created_at DESC LIMIT ?2",
-                )
-                .unwrap_or_else(|_| panic!("Failed to prepare following posts query"));
-            stmt.query_map(params![user_id, self.config.refresh_rec_post_count], |row| {
-                Ok(json!({
-                    "post_id": row.get::<_, i64>(0)?,
-                    "user_id": row.get::<_, i64>(1)?,
-                    "content": row.get::<_, String>(2)?,
-                    "created_at": row.get::<_, String>(3)?,
-                    "num_likes": row.get::<_, i64>(4)?,
-                    "num_dislikes": row.get::<_, i64>(5)?,
-                    "num_shares": row.get::<_, i64>(6)?,
-                }))
-            })
-            .unwrap_or_else(|_| panic!("Failed to query following posts"))
-            .filter_map(|r| r.ok())
-            .collect()
+        let following_posts: Vec<Value> = match db.prepare(
+            "SELECT p.post_id, p.user_id, p.content, p.created_at, p.num_likes, p.num_dislikes, p.num_shares \
+             FROM post p JOIN follow f ON p.user_id = f.followee_id \
+             WHERE f.follower_id = ?1 \
+             ORDER BY p.created_at DESC LIMIT ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(params![user_id, self.config.refresh_rec_post_count], |row| {
+                    Ok(json!({
+                        "post_id": row.get::<_, i64>(0)?,
+                        "user_id": row.get::<_, i64>(1)?,
+                        "content": row.get::<_, String>(2)?,
+                        "created_at": row.get::<_, String>(3)?,
+                        "num_likes": row.get::<_, i64>(4)?,
+                        "num_dislikes": row.get::<_, i64>(5)?,
+                        "num_shares": row.get::<_, i64>(6)?,
+                    }))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => {
+                return ActionResult::fail(&format!("refresh follow query failed: {}", e));
+            }
         };
 
         rec_posts.extend(following_posts);
@@ -817,26 +817,24 @@ impl Platform {
         let now = self.now_str();
         let search = format!("%{}%", query);
 
-        let posts: Vec<Value> = {
-            let mut stmt = db
-                .prepare(
-                    "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes \
-                     FROM post WHERE content LIKE ?1 OR CAST(post_id AS TEXT) = ?2 OR CAST(user_id AS TEXT) = ?2",
-                )
-                .unwrap();
-            stmt.query_map(params![search, query], |row| {
-                Ok(json!({
-                    "post_id": row.get::<_, i64>(0)?,
-                    "user_id": row.get::<_, i64>(1)?,
-                    "content": row.get::<_, String>(2)?,
-                    "created_at": row.get::<_, String>(3)?,
-                    "num_likes": row.get::<_, i64>(4)?,
-                    "num_dislikes": row.get::<_, i64>(5)?,
-                }))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        let posts: Vec<Value> = match db.prepare(
+            "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes \
+             FROM post WHERE content LIKE ?1 OR CAST(post_id AS TEXT) = ?2 OR CAST(user_id AS TEXT) = ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(params![search, query], |row| {
+                    Ok(json!({
+                        "post_id": row.get::<_, i64>(0)?,
+                        "user_id": row.get::<_, i64>(1)?,
+                        "content": row.get::<_, String>(2)?,
+                        "created_at": row.get::<_, String>(3)?,
+                        "num_likes": row.get::<_, i64>(4)?,
+                        "num_dislikes": row.get::<_, i64>(5)?,
+                    }))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => return ActionResult::fail(&format!("search_posts failed: {}", e)),
         };
 
         let _ = queries::record_trace(&db, user_id, "search_posts", &query, &now);
@@ -852,27 +850,25 @@ impl Platform {
         let now = self.now_str();
         let search = format!("%{}%", query);
 
-        let users: Vec<Value> = {
-            let mut stmt = db
-                .prepare(
-                    "SELECT user_id, user_name, name, bio, created_at, num_followings, num_followers \
-                     FROM user WHERE user_name LIKE ?1 OR name LIKE ?1 OR bio LIKE ?1 OR CAST(user_id AS TEXT) = ?2",
-                )
-                .unwrap();
-            stmt.query_map(params![search, query], |row| {
-                Ok(json!({
-                    "user_id": row.get::<_, i64>(0)?,
-                    "user_name": row.get::<_, String>(1)?,
-                    "name": row.get::<_, String>(2)?,
-                    "bio": row.get::<_, String>(3)?,
-                    "created_at": row.get::<_, String>(4)?,
-                    "num_followings": row.get::<_, i64>(5)?,
-                    "num_followers": row.get::<_, i64>(6)?,
-                }))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        let users: Vec<Value> = match db.prepare(
+            "SELECT user_id, user_name, name, bio, created_at, num_followings, num_followers \
+             FROM user WHERE user_name LIKE ?1 OR name LIKE ?1 OR bio LIKE ?1 OR CAST(user_id AS TEXT) = ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(params![search, query], |row| {
+                    Ok(json!({
+                        "user_id": row.get::<_, i64>(0)?,
+                        "user_name": row.get::<_, String>(1)?,
+                        "name": row.get::<_, String>(2)?,
+                        "bio": row.get::<_, String>(3)?,
+                        "created_at": row.get::<_, String>(4)?,
+                        "num_followings": row.get::<_, i64>(5)?,
+                        "num_followers": row.get::<_, i64>(6)?,
+                    }))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => return ActionResult::fail(&format!("search_user failed: {}", e)),
         };
 
         let _ = queries::record_trace(&db, user_id, "search_user", &query, &now);
@@ -1029,7 +1025,7 @@ impl Platform {
                     "UPDATE post SET num_reports = num_reports + 1 WHERE post_id = ?1",
                     params![post_id],
                 );
-                let _ = queries::record_trace(&db, user_id, "report_post", &format!("post_id: {}", post_id), &now);
+                let _ = queries::record_trace(&db, user_id, "report_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "report_id": report_id }))
             }
             Err(e) => ActionResult::fail(&format!("report_post failed: {}", e)),

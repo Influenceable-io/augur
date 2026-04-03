@@ -5,12 +5,11 @@ use anyhow::Result;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
 
-use serde_json::Value;
-
+use crate::agent::action::SocialAction;
 use crate::agent::graph::AgentGraph;
 use crate::channel::Channel;
 use crate::clock::Clock;
-use crate::env_action::{Action, ManualAction};
+use crate::env_action::Action;
 use crate::platform::{Platform, PlatformConfig};
 use crate::types::*;
 use crate::PlatformOrDefault;
@@ -57,7 +56,7 @@ impl AugurEnv {
             }
             PlatformOrDefault::Custom(p) => {
                 let clock = p.sandbox_clock();
-                let pt = DefaultPlatformType::Twitter; // Custom platforms default to Twitter type
+                let pt = DefaultPlatformType::Twitter;
                 (Arc::new(p), pt, clock)
             }
         };
@@ -86,7 +85,6 @@ impl AugurEnv {
             platform.running().await;
         }));
 
-        // Sign up all agents
         let graph = self.agent_graph.read().await;
         for (agent_id, agent) in graph.get_agents() {
             let user_name = agent.user_info.user_name.as_deref().unwrap_or("unknown");
@@ -104,10 +102,8 @@ impl AugurEnv {
             let _ = self.channel.read_from_send_queue(msg_id).await;
         }
 
-        // Insert follow relationships from agent graph edges
         for (from, to) in graph.get_edges() {
             // In OASIS, followee_id is the user_id (1-indexed autoincrement)
-            // agent_id 0 -> user_id 1, agent_id 1 -> user_id 2, etc.
             let followee_user_id = to + 1;
             let msg_id = self
                 .channel
@@ -120,27 +116,27 @@ impl AugurEnv {
             let _ = self.channel.read_from_send_queue(msg_id).await;
         }
 
-        // Insert previous posts from agent profiles
         for (agent_id, agent) in graph.get_agents() {
             if let Some(profile) = &agent.user_info.profile
-                && let Some(tweets_val) = profile.get("previous_tweets") {
-                    let tweets_str = tweets_val.as_str().unwrap_or("");
-                    for tweet in tweets_str
-                        .split(';')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                    {
-                        let msg_id = self
-                            .channel
-                            .write_to_receive_queue(
-                                agent_id,
-                                serde_json::json!(tweet),
-                                ActionType::CreatePost,
-                            )
-                            .await;
-                        let _ = self.channel.read_from_send_queue(msg_id).await;
-                    }
+                && let Some(tweets_val) = profile.get("previous_tweets")
+            {
+                let tweets_str = tweets_val.as_str().unwrap_or("");
+                for tweet in tweets_str
+                    .split(';')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    let msg_id = self
+                        .channel
+                        .write_to_receive_queue(
+                            agent_id,
+                            serde_json::json!(tweet),
+                            ActionType::CreatePost,
+                        )
+                        .await;
+                    let _ = self.channel.read_from_send_queue(msg_id).await;
                 }
+            }
         }
 
         Ok(())
@@ -152,10 +148,8 @@ impl AugurEnv {
     /// 2. Process all agent actions concurrently
     /// 3. Increment clock (Twitter mode)
     pub async fn step(&mut self, actions: HashMap<i64, Action>) -> Result<()> {
-        // 1. Update recommendations
         self.platform.update_rec_table().await;
 
-        // 2. Process actions concurrently
         let mut tasks = Vec::new();
         for (agent_id, action) in actions {
             let semaphore = self.llm_semaphore.clone();
@@ -164,69 +158,36 @@ impl AugurEnv {
 
             tasks.push(tokio::spawn(async move {
                 match action {
-                    Action::Manual(manual) => {
-                        // Route manual actions through the env's channel so the
-                        // platform event loop processes them, matching how
-                        // reset() dispatches sign-up and follow actions.
-                        let msg = manual_action_to_message(&manual);
-                        let msg_id = channel
-                            .write_to_receive_queue(agent_id, msg, manual.action_type)
-                            .await;
-                        let _ = channel.read_from_send_queue(msg_id).await;
-                    }
-                    Action::Llm(_) => {
-                        let _permit = semaphore.acquire().await.unwrap();
-                        let mut graph = agent_graph.write().await;
-                        if let Some(agent) = graph.get_agent_mut(agent_id) {
-                            agent.perform_action_by_llm().await;
-                        }
-                    }
-                    Action::Interview { prompt } => {
-                        let mut graph = agent_graph.write().await;
-                        if let Some(agent) = graph.get_agent_mut(agent_id) {
-                            agent.perform_interview(&prompt).await;
-                        }
-                    }
                     Action::Multiple(sub_actions) => {
                         for sub in sub_actions {
-                            // Process each sub-action sequentially
-                            match sub {
-                                Action::Manual(manual) => {
-                                    let msg = manual_action_to_message(&manual);
-                                    let msg_id = channel
-                                        .write_to_receive_queue(agent_id, msg, manual.action_type)
-                                        .await;
-                                    let _ = channel.read_from_send_queue(msg_id).await;
-                                }
-                                Action::Llm(_) => {
-                                    let _permit = semaphore.acquire().await.unwrap();
-                                    let mut graph = agent_graph.write().await;
-                                    if let Some(agent) = graph.get_agent_mut(agent_id) {
-                                        agent.perform_action_by_llm().await;
-                                    }
-                                }
-                                Action::Interview { prompt } => {
-                                    let mut graph = agent_graph.write().await;
-                                    if let Some(agent) = graph.get_agent_mut(agent_id) {
-                                        agent.perform_interview(&prompt).await;
-                                    }
-                                }
-                                Action::Multiple(_) => {
-                                    tracing::warn!("Nested Multiple actions not supported");
-                                }
-                            }
+                            process_single_action(
+                                agent_id,
+                                sub,
+                                &semaphore,
+                                &agent_graph,
+                                channel.clone(),
+                            )
+                            .await;
                         }
+                    }
+                    single => {
+                        process_single_action(
+                            agent_id,
+                            single,
+                            &semaphore,
+                            &agent_graph,
+                            channel.clone(),
+                        )
+                        .await;
                     }
                 }
             }));
         }
 
-        // Wait for all actions to complete
         for task in tasks {
             task.await?;
         }
 
-        // 3. Increment clock for Twitter mode
         if self.platform_type == DefaultPlatformType::Twitter {
             let mut clock = self.sandbox_clock.write().await;
             clock.time_step += 1;
@@ -250,82 +211,40 @@ impl AugurEnv {
     }
 }
 
-/// Convert a ManualAction's HashMap args into the Value format the platform
-/// dispatch expects.
+/// Process a single (non-Multiple) action for an agent.
 ///
-/// The platform handler for each action type expects a specific JSON shape
-/// (e.g., CreatePost expects a plain string, LikePost expects a plain integer).
-/// This mirrors the extraction logic in SocialAction::perform_action_by_name.
-fn manual_action_to_message(manual: &ManualAction) -> Value {
-    let args = &manual.action_args;
-    match manual.action_type {
-        ActionType::CreatePost => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            serde_json::json!(content)
+/// Routes Manual actions through SocialAction::perform_action_by_name
+/// so arg extraction logic is defined in exactly one place.
+async fn process_single_action(
+    agent_id: i64,
+    action: Action,
+    semaphore: &Semaphore,
+    agent_graph: &RwLock<AgentGraph>,
+    channel: Arc<Channel>,
+) {
+    match action {
+        Action::Manual(manual) => {
+            let sa = SocialAction::new(agent_id, channel);
+            let args_value =
+                serde_json::to_value(&manual.action_args).unwrap_or_default();
+            sa.perform_action_by_name(&manual.action_type.to_string(), &args_value)
+                .await;
         }
-        ActionType::Repost
-        | ActionType::LikePost
-        | ActionType::UnlikePost
-        | ActionType::DislikePost
-        | ActionType::UndoDislikePost => {
-            let post_id = args
-                .get("post_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            serde_json::json!(post_id)
+        Action::Llm(_) => {
+            let _permit = semaphore.acquire().await.unwrap();
+            let mut graph = agent_graph.write().await;
+            if let Some(agent) = graph.get_agent_mut(agent_id) {
+                agent.perform_action_by_llm().await;
+            }
         }
-        ActionType::LikeComment
-        | ActionType::UnlikeComment
-        | ActionType::DislikeComment
-        | ActionType::UndoDislikeComment => {
-            let comment_id = args
-                .get("comment_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            serde_json::json!(comment_id)
+        Action::Interview { prompt } => {
+            let mut graph = agent_graph.write().await;
+            if let Some(agent) = graph.get_agent_mut(agent_id) {
+                agent.perform_interview(&prompt).await;
+            }
         }
-        ActionType::Follow | ActionType::Unfollow => {
-            let followee_id = args
-                .get("followee_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            serde_json::json!(followee_id)
+        Action::Multiple(_) => {
+            tracing::warn!("Nested Multiple actions not supported");
         }
-        ActionType::Mute | ActionType::Unmute => {
-            let mutee_id = args
-                .get("mutee_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            serde_json::json!(mutee_id)
-        }
-        ActionType::SearchPosts | ActionType::SearchUser => {
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            serde_json::json!(query)
-        }
-        ActionType::CreateGroup => {
-            let name = args
-                .get("group_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            serde_json::json!(name)
-        }
-        ActionType::JoinGroup | ActionType::LeaveGroup => {
-            let group_id = args
-                .get("group_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            serde_json::json!(group_id)
-        }
-        // For complex actions (QuotePost, CreateComment, SignUp, SendToGroup,
-        // ReportPost, PurchaseProduct, Interview) and no-arg actions (Refresh,
-        // Trend, ListenFromGroup, DoNothing, Exit, UpdateRecTable), pass
-        // the full args object through.
-        _ => serde_json::to_value(args).unwrap_or_default(),
     }
 }

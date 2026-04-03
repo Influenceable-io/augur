@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use super::embeddings::{cosine_similarity_matrix, simple_text_embeddings};
+use super::embeddings::{cosine_similarity_matrix, embed_users_and_posts};
 use super::{PostRow, TraceRow, UserRow};
 
 /// Twitter-style personalized recommendations using cosine similarity.
@@ -21,20 +21,9 @@ pub fn recommend(
         return Vec::new();
     }
 
-    let embedding_dim = 128;
-
-    // Encode user bios
-    let user_texts: Vec<String> = user_table.iter().map(|u| u.bio.clone()).collect();
-    let user_embeddings = simple_text_embeddings(&user_texts, embedding_dim);
-
-    // Encode post contents
-    let post_texts: Vec<String> = post_table.iter().map(|p| p.content.clone()).collect();
-    let post_embeddings = simple_text_embeddings(&post_texts, embedding_dim);
-
-    // Compute similarity matrix: users x posts
+    let (user_embeddings, post_embeddings) = embed_users_and_posts(user_table, post_table);
     let sim_matrix = cosine_similarity_matrix(&user_embeddings, &post_embeddings);
 
-    // For each user, get top-k posts (excluding own posts)
     let mut recommendations = Vec::new();
     for (user_idx, user) in user_table.iter().enumerate() {
         let mut scored: Vec<(usize, f32)> = (0..post_table.len())

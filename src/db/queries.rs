@@ -29,33 +29,68 @@ pub fn get_post_type(conn: &Connection, post_id: i64) -> Result<String> {
 }
 
 /// Fetch all posts with their comments attached.
+///
+/// Uses a single query with IN clause instead of N+1 per-post queries.
 pub fn add_comments_to_posts(conn: &Connection, posts: &[Value]) -> Result<Vec<Value>> {
-    let mut result = Vec::new();
-    for post in posts {
-        let mut post = post.clone();
-        if let Some(post_id) = post.get("post_id").and_then(|v| v.as_i64()) {
-            let mut stmt = conn.prepare(
-                "SELECT comment_id, post_id, user_id, content, created_at, num_likes, num_dislikes \
-                 FROM comment WHERE post_id = ?1 ORDER BY created_at ASC",
-            )?;
-            let comments: Vec<Value> = stmt
-                .query_map(params![post_id], |row| {
-                    Ok(serde_json::json!({
-                        "comment_id": row.get::<_, i64>(0)?,
-                        "post_id": row.get::<_, i64>(1)?,
-                        "user_id": row.get::<_, i64>(2)?,
-                        "content": row.get::<_, String>(3)?,
-                        "created_at": row.get::<_, String>(4)?,
-                        "num_likes": row.get::<_, i64>(5)?,
-                        "num_dislikes": row.get::<_, i64>(6)?,
-                    }))
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-            post["comments"] = Value::Array(comments);
-        }
-        result.push(post);
+    let post_ids: Vec<i64> = posts
+        .iter()
+        .filter_map(|p| p.get("post_id").and_then(|v| v.as_i64()))
+        .collect();
+
+    if post_ids.is_empty() {
+        return Ok(posts.to_vec());
     }
+
+    // Build IN clause: "WHERE post_id IN (?, ?, ?)"
+    let placeholders: Vec<String> = post_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT comment_id, post_id, user_id, content, created_at, num_likes, num_dislikes \
+         FROM comment WHERE post_id IN ({}) ORDER BY post_id, created_at ASC",
+        placeholders.join(", ")
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::types::ToSql> =
+        post_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+
+    // Group comments by post_id
+    let mut comments_by_post: std::collections::HashMap<i64, Vec<Value>> =
+        std::collections::HashMap::new();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        let post_id: i64 = row.get(1)?;
+        let comment = serde_json::json!({
+            "comment_id": row.get::<_, i64>(0)?,
+            "post_id": post_id,
+            "user_id": row.get::<_, i64>(2)?,
+            "content": row.get::<_, String>(3)?,
+            "created_at": row.get::<_, String>(4)?,
+            "num_likes": row.get::<_, i64>(5)?,
+            "num_dislikes": row.get::<_, i64>(6)?,
+        });
+        Ok((post_id, comment))
+    })?;
+
+    for row in rows {
+        if let Ok((post_id, comment)) = row {
+            comments_by_post.entry(post_id).or_default().push(comment);
+        }
+    }
+
+    // Attach comments to posts
+    let result: Vec<Value> = posts
+        .iter()
+        .map(|post| {
+            let mut post = post.clone();
+            if let Some(post_id) = post.get("post_id").and_then(|v| v.as_i64()) {
+                let comments = comments_by_post
+                    .remove(&post_id)
+                    .unwrap_or_default();
+                post["comments"] = Value::Array(comments);
+            }
+            post
+        })
+        .collect();
+
     Ok(result)
 }
 

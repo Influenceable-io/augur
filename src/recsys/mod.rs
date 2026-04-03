@@ -8,6 +8,9 @@ use rusqlite::{params, Connection};
 
 use crate::types::RecsysType;
 
+/// Trace info prefix for like_post actions (shared between platform and recsys).
+pub const TRACE_LIKE_POST_PREFIX: &str = "post_id: ";
+
 /// Row from the user table for recsys processing.
 #[derive(Debug, Clone)]
 pub struct UserRow {
