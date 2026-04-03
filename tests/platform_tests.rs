@@ -140,7 +140,7 @@ async fn setup_two_agents() -> TwoAgentHarness {
 // Tests
 // ============================================================================
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_post() {
     let h = setup().await;
 
@@ -152,7 +152,7 @@ async fn test_create_post() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_follow_and_unfollow() {
     let h = setup_two_agents().await;
 
@@ -175,7 +175,7 @@ async fn test_follow_and_unfollow() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_like_unlike_post() {
     let h = setup_two_agents().await;
 
@@ -203,7 +203,7 @@ async fn test_like_unlike_post() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dislike_undo_dislike_post() {
     let h = setup_two_agents().await;
 
@@ -231,7 +231,7 @@ async fn test_dislike_undo_dislike_post() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_repost() {
     let h = setup_two_agents().await;
 
@@ -253,7 +253,7 @@ async fn test_repost() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_comment_and_engagement() {
     let h = setup_two_agents().await;
 
@@ -309,7 +309,7 @@ async fn test_create_comment_and_engagement() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_mute_unmute() {
     let h = setup_two_agents().await;
 
@@ -328,7 +328,7 @@ async fn test_mute_unmute() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_search_posts() {
     let h = setup().await;
 
@@ -371,7 +371,7 @@ async fn test_search_posts() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_search_user() {
     let h = setup_two_agents().await;
 
@@ -403,7 +403,7 @@ async fn test_search_user() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_trend() {
     let h = setup().await;
 
@@ -426,7 +426,7 @@ async fn test_trend() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_quote_post() {
     let h = setup_two_agents().await;
 
@@ -453,7 +453,7 @@ async fn test_quote_post() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_group_chat_lifecycle() {
     let h = setup_two_agents().await;
 
@@ -493,7 +493,7 @@ async fn test_group_chat_lifecycle() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_report_post() {
     let h = setup_two_agents().await;
 
@@ -517,7 +517,7 @@ async fn test_report_post() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_do_nothing() {
     let h = setup().await;
 
@@ -527,7 +527,7 @@ async fn test_do_nothing() {
     h.teardown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_self_rating_disabled() {
     let config = PlatformConfig {
         allow_self_rating: false,

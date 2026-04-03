@@ -122,8 +122,8 @@ impl AugurEnv {
 
         // Insert previous posts from agent profiles
         for (agent_id, agent) in graph.get_agents() {
-            if let Some(profile) = &agent.user_info.profile {
-                if let Some(tweets_val) = profile.get("previous_tweets") {
+            if let Some(profile) = &agent.user_info.profile
+                && let Some(tweets_val) = profile.get("previous_tweets") {
                     let tweets_str = tweets_val.as_str().unwrap_or("");
                     for tweet in tweets_str
                         .split(';')
@@ -141,7 +141,6 @@ impl AugurEnv {
                         let _ = self.channel.read_from_send_queue(msg_id).await;
                     }
                 }
-            }
         }
 
         Ok(())

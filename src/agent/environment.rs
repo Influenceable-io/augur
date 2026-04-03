@@ -16,11 +16,10 @@ impl SocialEnvironment {
     /// Get posts from the agent's feed via refresh.
     pub async fn get_posts_env(&self) -> String {
         let result = self.action.refresh().await;
-        if result.success {
-            if let Some(posts) = result.data.get("posts") {
+        if result.success
+            && let Some(posts) = result.data.get("posts") {
                 return format!("After refreshing, you see some posts: {}", posts);
             }
-        }
         "No posts available.".to_string()
     }
 
@@ -38,14 +37,13 @@ impl SocialEnvironment {
     /// Get group chat messages.
     pub async fn get_group_env(&self) -> String {
         let result = self.action.listen_from_group().await;
-        if result.success {
-            if let Some(messages) = result.data.get("messages") {
+        if result.success
+            && let Some(messages) = result.data.get("messages") {
                 return format!(
                     "And there are many group chat channels. Here are recent messages: {}",
                     messages
                 );
             }
-        }
         "".to_string()
     }
 

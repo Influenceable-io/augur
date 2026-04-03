@@ -34,18 +34,15 @@ pub fn recommend(
     // Build liked-post index per user from trace table
     let mut user_liked_posts: HashMap<i64, Vec<usize>> = HashMap::new();
     for trace in trace_table {
-        if trace.action == "like_post" {
-            if let Some(pid_str) = trace.info.strip_prefix("post_id: ") {
-                if let Ok(pid) = pid_str.trim().parse::<i64>() {
-                    if let Some(post_idx) = post_table.iter().position(|p| p.post_id == pid) {
+        if trace.action == "like_post"
+            && let Some(pid_str) = trace.info.strip_prefix("post_id: ")
+                && let Ok(pid) = pid_str.trim().parse::<i64>()
+                    && let Some(post_idx) = post_table.iter().position(|p| p.post_id == pid) {
                         user_liked_posts
                             .entry(trace.user_id)
                             .or_default()
                             .push(post_idx);
                     }
-                }
-            }
-        }
     }
 
     let mut recommendations = Vec::new();

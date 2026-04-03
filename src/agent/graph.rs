@@ -60,11 +60,10 @@ impl AgentGraph {
     }
 
     pub fn remove_edge(&mut self, from: i64, to: i64) {
-        if let (Some(&from_node), Some(&to_node)) = (self.node_map.get(&from), self.node_map.get(&to)) {
-            if let Some(edge) = self.graph.find_edge(from_node, to_node) {
+        if let (Some(&from_node), Some(&to_node)) = (self.node_map.get(&from), self.node_map.get(&to))
+            && let Some(edge) = self.graph.find_edge(from_node, to_node) {
                 self.graph.remove_edge(edge);
             }
-        }
     }
 
     pub fn get_edges(&self) -> Vec<(i64, i64)> {
