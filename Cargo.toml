@@ -1,0 +1,61 @@
+[package]
+name = "augur"
+version = "0.1.0"
+edition = "2024"
+description = "High-performance social media simulation engine — a 1:1 Rust port of OASIS"
+license = "Apache-2.0"
+repository = "https://github.com/influenceable-io/augur"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Graph
+petgraph = "0.6"
+
+# Async collections
+dashmap = "6"
+
+# UUID for message IDs
+uuid = { version = "1", features = ["v4"] }
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }
+
+# LLM client
+async-openai = "0.27"
+
+# Embeddings (for Twitter/TWHiN recsys)
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+tokenizers = "0.21"
+
+# Math (for recsys)
+ndarray = "0.16"
+
+# CSV parsing (for Twitter agent generator)
+csv = "1"
+
+# Random (for recsys)
+rand = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async trait support
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
