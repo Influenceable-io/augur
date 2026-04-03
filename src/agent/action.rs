@@ -21,7 +21,7 @@ impl SocialAction {
     }
 
     /// Send an action through the channel and wait for the result.
-    async fn perform_action(&self, message: Value, action_type: ActionType) -> ActionResult {
+    pub async fn perform_action(&self, message: Value, action_type: ActionType) -> ActionResult {
         let message_id = self
             .channel
             .write_to_receive_queue(self.agent_id, message, action_type)

@@ -8,7 +8,7 @@ pub fn create_all_tables(conn: &Connection) -> Result<()> {
         -- User accounts
         CREATE TABLE IF NOT EXISTS user (
             user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            agent_id INTEGER,
+            agent_id INTEGER UNIQUE,
             user_name TEXT,
             name TEXT,
             bio TEXT,

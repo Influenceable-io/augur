@@ -65,10 +65,14 @@ impl Channel {
     /// Agent polls for a response by message_id. Blocks until available.
     pub async fn read_from_send_queue(&self, message_id: Uuid) -> ChannelResponse {
         loop {
+            // Pin and enable the notification BEFORE checking the map to avoid
+            // a race where notify_waiters() fires between our check and await.
+            let mut notified = std::pin::pin!(self.notify.notified());
+            notified.as_mut().enable();
             if let Some((_, response)) = self.send_dict.remove(&message_id) {
                 return response;
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
