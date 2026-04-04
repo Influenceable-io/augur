@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use super::embeddings::{cosine_similarity_matrix, embed_users_and_posts};
+use super::embeddings::{cosine_similarity_matrix, embed_users_and_posts, EmbeddingModelType};
 use super::{PostRow, TraceRow, UserRow};
 
 /// Twitter-style personalized recommendations using cosine similarity.
@@ -21,7 +21,7 @@ pub fn recommend(
         return Vec::new();
     }
 
-    let (user_embeddings, post_embeddings) = embed_users_and_posts(user_table, post_table);
+    let (user_embeddings, post_embeddings) = embed_users_and_posts(user_table, post_table, EmbeddingModelType::MiniLM);
     let sim_matrix = cosine_similarity_matrix(&user_embeddings, &post_embeddings);
 
     let mut recommendations = Vec::new();

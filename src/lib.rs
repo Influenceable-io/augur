@@ -17,9 +17,10 @@ pub use clock::Clock;
 pub use env::AugurEnv;
 pub use env_action::*;
 pub use agent::{SocialAgent, UserInfo};
-pub use agent::graph::AgentGraph;
+pub use agent::graph::{AgentGraph, GraphBackend, InMemoryGraph};
 pub use agent::generator::{generate_twitter_agent_graph, generate_reddit_agent_graph};
 pub use platform::Platform;
+pub use llm::{ModelConfig, LlmBackend, openai::OpenAIBackend};
 
 /// Factory function matching oasis.make()
 pub async fn make(

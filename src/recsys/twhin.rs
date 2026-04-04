@@ -1,16 +1,20 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::embeddings::{cosine_similarity, embed_users_and_posts};
+use super::embeddings::{cosine_similarity, embed_users_and_posts, EmbeddingModelType};
 use super::{PostRow, TraceRow, UserRow, TRACE_LIKE_POST_PREFIX};
+
+/// Maximum posts to consider before fine-grained scoring (matches OASIS coarse filter).
+const COARSE_FILTER_LIMIT: usize = 4000;
 
 /// TWHiN-BERT personalized recommendations with multi-signal scoring.
 ///
 /// Matches OASIS's rec_sys_personalized_twh:
-/// 1. Time decay: `log((271.8 - elapsed_steps) / 100)`
-/// 2. Profile similarity: cosine similarity between user profile and post
-/// 3. Like similarity: avg cosine similarity with user's last 5 liked posts
-/// 4. Final score: cosine_similarity * date_score + like_score
+/// 1. Coarse filter: take most recent 4000 posts
+/// 2. Time decay: `log((271.8 - elapsed_steps) / 100)`
+/// 3. Profile similarity: cosine similarity between user profile and post
+/// 4. Like similarity: avg cosine similarity with user's last 5 liked posts
+/// 5. Final score: cosine_similarity * date_score + like_score
 pub fn recommend(
     user_table: &[UserRow],
     post_table: &[PostRow],
@@ -21,7 +25,21 @@ pub fn recommend(
         return Vec::new();
     }
 
-    let (user_embeddings, post_embeddings) = embed_users_and_posts(user_table, post_table);
+    // Coarse filter: keep only the most recent COARSE_FILTER_LIMIT posts (matches OASIS)
+    let post_table = if post_table.len() > COARSE_FILTER_LIMIT {
+        &post_table[post_table.len() - COARSE_FILTER_LIMIT..]
+    } else {
+        post_table
+    };
+
+    let (user_embeddings, post_embeddings) = embed_users_and_posts(user_table, post_table, EmbeddingModelType::TwhinBert);
+
+    // Build post_id → index lookup for O(1) resolution in trace scanning
+    let post_idx_map: HashMap<i64, usize> = post_table
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.post_id, i))
+        .collect();
 
     // Build liked-post index per user from trace table
     let mut user_liked_posts: HashMap<i64, Vec<usize>> = HashMap::new();
@@ -29,7 +47,7 @@ pub fn recommend(
         if trace.action == "like_post"
             && let Some(pid_str) = trace.info.strip_prefix(TRACE_LIKE_POST_PREFIX)
             && let Ok(pid) = pid_str.trim().parse::<i64>()
-            && let Some(post_idx) = post_table.iter().position(|p| p.post_id == pid)
+            && let Some(&post_idx) = post_idx_map.get(&pid)
         {
             user_liked_posts
                 .entry(trace.user_id)

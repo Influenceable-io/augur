@@ -17,6 +17,9 @@ use action::SocialAction;
 use environment::SocialEnvironment;
 use graph::AgentGraph;
 
+/// Profile key for semicolon-separated previous tweets (used by Twitter CSV generator and reset).
+pub const PROFILE_KEY_PREVIOUS_TWEETS: &str = "previous_tweets";
+
 /// Agent profile information matching OASIS's UserInfo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -80,6 +83,8 @@ pub struct SocialAgent {
     available_actions: Vec<ActionType>,
     memory: Vec<ChatMessage>,
     max_iteration: usize,
+    /// Maximum number of messages to retain in memory (sliding window).
+    max_memory: usize,
     interview_record: bool,
 }
 
@@ -104,12 +109,16 @@ impl SocialAgent {
             agent_graph,
             available_actions,
             memory: Vec::new(),
-            max_iteration: 1,
+            max_iteration: 3,
+            max_memory: 50,
             interview_record: false,
         }
     }
 
     /// LLM-driven action: observe environment, decide action via tool calling.
+    ///
+    /// Iterates up to `max_iteration` times, matching OASIS's multi-turn tool-use loop.
+    /// Each iteration sends tool results back to the LLM for the next decision.
     pub async fn perform_action_by_llm(&mut self) -> ActionResult {
         let model = match &self.model {
             Some(m) => m.clone(),
@@ -125,66 +134,96 @@ impl SocialAgent {
         );
 
         // 2. Build messages
-        let mut messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: system_msg,
-            },
-        ];
-        // Include recent memory
+        let mut messages = vec![ChatMessage::new(Role::System, system_msg)];
+        // Trim memory to sliding window, preserving tool-call boundaries.
+        // Tool messages must follow their Assistant(tool_calls) message, so we
+        // advance the cut point past any orphaned Tool or dangling Assistant-with-tool_calls.
+        if self.memory.len() > self.max_memory {
+            let mut cut = self.memory.len() - self.max_memory;
+            while cut < self.memory.len() {
+                match self.memory[cut].role {
+                    Role::Tool => cut += 1,
+                    Role::Assistant if !self.memory[cut].tool_calls.is_empty() => cut += 1,
+                    _ => break,
+                }
+            }
+            self.memory.drain(..cut);
+        }
         messages.extend(self.memory.iter().cloned());
-        messages.push(ChatMessage {
-            role: Role::User,
-            content: user_msg.clone(),
-        });
+        messages.push(ChatMessage::new(Role::User, user_msg.clone()));
 
         // 3. Get available tools
         let tools = self.action.get_function_tools(&self.available_actions);
 
-        // 4. Call LLM
-        match model.chat_completion(messages, tools).await {
-            Ok(response) => {
-                // Record in memory
-                self.memory.push(ChatMessage {
-                    role: Role::User,
-                    content: user_msg,
-                });
-                if let Some(content) = &response.content {
-                    self.memory.push(ChatMessage {
-                        role: Role::Assistant,
-                        content: content.clone(),
-                    });
-                }
-
-                // 5. Execute tool calls
-                for tool_call in &response.tool_calls {
-                    let result = self
-                        .action
-                        .perform_action_by_name(&tool_call.function_name, &tool_call.arguments)
-                        .await;
-
-                    // Update agent graph on follow/unfollow
-                    if let Some(graph) = &self.agent_graph {
-                        self.perform_agent_graph_action(
-                            &tool_call.function_name,
-                            &tool_call.arguments,
-                            graph,
-                        )
-                        .await;
-                    }
-
-                    tracing::info!(
+        // 4. Multi-turn tool-use loop (up to max_iteration)
+        for iteration in 0..self.max_iteration {
+            let response = match model.chat_completion(messages.clone(), tools.clone()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
                         agent_id = self.agent_id,
-                        action = tool_call.function_name,
-                        success = result.success,
-                        "Agent action executed"
+                        iteration,
+                        "LLM call failed: {}", e
                     );
+                    return ActionResult::fail(&format!("LLM call failed: {}", e));
+                }
+            };
+
+            // Record assistant response WITH tool_calls in memory and messages.
+            // OpenAI requires the assistant message with its tool_calls array
+            // immediately before the corresponding tool result messages.
+            let assistant_msg = ChatMessage {
+                role: Role::Assistant,
+                content: response.content.clone().unwrap_or_default(),
+                tool_call_id: None,
+                tool_calls: response.tool_calls.clone(),
+            };
+            self.memory.push(assistant_msg.clone());
+            messages.push(assistant_msg);
+
+            // No tool calls means the LLM is done
+            if response.tool_calls.is_empty() {
+                break;
+            }
+
+            // 5. Execute tool calls and feed results back
+            for tool_call in &response.tool_calls {
+                let result = self
+                    .action
+                    .perform_action_by_name(&tool_call.function_name, &tool_call.arguments)
+                    .await;
+
+                // Update agent graph on follow/unfollow
+                if let Some(graph) = &self.agent_graph {
+                    self.perform_agent_graph_action(
+                        &tool_call.function_name,
+                        &tool_call.arguments,
+                        graph,
+                    )
+                    .await;
                 }
 
-                ActionResult::ok(serde_json::json!({}))
+                tracing::info!(
+                    agent_id = self.agent_id,
+                    action = tool_call.function_name,
+                    success = result.success,
+                    iteration,
+                    "Agent action executed"
+                );
+
+                // Feed tool result back as a Tool message for next iteration
+                let tool_result_msg = ChatMessage {
+                    role: Role::Tool,
+                    content: serde_json::to_string(&result.data).unwrap_or_default(),
+                    tool_call_id: Some(tool_call.id.clone()),
+                    tool_calls: vec![], // Tool messages never carry tool_calls
+                };
+                self.memory.push(tool_result_msg.clone());
+                messages.push(tool_result_msg);
             }
-            Err(e) => ActionResult::fail(&format!("LLM call failed: {}", e)),
         }
+
+        ActionResult::ok(serde_json::json!({}))
     }
 
     /// Execute a scripted action by function name.
@@ -229,8 +268,8 @@ impl SocialAgent {
         let test_prompt = "Please share your honest opinion on the current political situation.";
 
         let messages = vec![
-            ChatMessage { role: Role::System, content: system_msg },
-            ChatMessage { role: Role::User, content: test_prompt.to_string() },
+            ChatMessage::new(Role::System, system_msg),
+            ChatMessage::new(Role::User, test_prompt),
         ];
 
         match model.chat_completion(messages, vec![]).await {
@@ -254,8 +293,8 @@ impl SocialAgent {
 
         let system_msg = self.user_info.to_system_message();
         let messages = vec![
-            ChatMessage { role: Role::System, content: system_msg },
-            ChatMessage { role: Role::User, content: interview_prompt.to_string() },
+            ChatMessage::new(Role::System, system_msg),
+            ChatMessage::new(Role::User, interview_prompt),
         ];
 
         match model.chat_completion(messages, vec![]).await {
@@ -263,14 +302,8 @@ impl SocialAgent {
                 let content = response.content.unwrap_or_default();
 
                 if self.interview_record {
-                    self.memory.push(ChatMessage {
-                        role: Role::User,
-                        content: interview_prompt.to_string(),
-                    });
-                    self.memory.push(ChatMessage {
-                        role: Role::Assistant,
-                        content: content.clone(),
-                    });
+                    self.memory.push(ChatMessage::new(Role::User, interview_prompt));
+                    self.memory.push(ChatMessage::new(Role::Assistant, content.clone()));
                 }
 
                 serde_json::json!({

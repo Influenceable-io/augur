@@ -20,7 +20,9 @@ pub fn generate_twitter_agent_graph(
 ) -> Result<AgentGraph> {
     let mut graph = AgentGraph::new();
 
+    // First pass: parse agents and collect follow/tweet data
     let mut reader = csv::Reader::from_path(agent_info_path)?;
+    let mut follow_edges: Vec<(i64, i64)> = Vec::new();
 
     for (idx, record) in reader.records().enumerate() {
         let record = record?;
@@ -29,10 +31,33 @@ pub fn generate_twitter_agent_graph(
         let username = record.get(0).unwrap_or("").to_string();
         let name = record.get(1).unwrap_or("").to_string();
         let description = record.get(2).unwrap_or("").to_string();
+        // Column 3 is user_char (unused in OASIS, skipped)
+        let following_list = record.get(4).unwrap_or("").to_string();
+        let previous_tweets = record.get(5).unwrap_or("").to_string();
 
-        let user_info = UserInfo::new(&username, &name, &description);
+        // Parse following_agentid_list (comma-separated agent IDs in brackets)
+        let cleaned = following_list.trim().trim_matches(|c| c == '[' || c == ']');
+        for id_str in cleaned.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Ok(followee_id) = id_str.parse::<i64>() {
+                follow_edges.push((agent_id, followee_id));
+            }
+        }
 
-        // Agents created without channel connection (profile-only, matching OASIS)
+        // Store previous_tweets in profile for reset() to pick up
+        let mut profile = std::collections::HashMap::new();
+        if !previous_tweets.is_empty() {
+            profile.insert(super::PROFILE_KEY_PREVIOUS_TWEETS.to_string(), serde_json::json!(previous_tweets));
+        }
+
+        let user_info = UserInfo {
+            user_name: Some(username),
+            name: Some(name),
+            description: Some(description),
+            profile: if profile.is_empty() { None } else { Some(profile) },
+            recsys_type: crate::types::RecsysType::Twitter,
+            is_controllable: false,
+        };
+
         let channel = Arc::new(Channel::new());
         let agent = SocialAgent::new(
             agent_id,
@@ -44,6 +69,11 @@ pub fn generate_twitter_agent_graph(
         );
 
         graph.add_agent(agent_id, agent);
+    }
+
+    // Second pass: add follow edges
+    for (from, to) in follow_edges {
+        graph.add_edge(from, to);
     }
 
     tracing::info!("Generated Twitter agent graph with {} agents", graph.get_num_nodes());

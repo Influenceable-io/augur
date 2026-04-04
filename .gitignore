@@ -21,8 +21,9 @@ target
 #.idea/
 
 
-# Planning docs (local only)
+# Planning/design docs (local only)
 docs/plans/
+docs/superpowers/
 
 # Added by cargo
 

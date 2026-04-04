@@ -94,6 +94,30 @@ pub fn add_comments_to_posts(conn: &Connection, posts: &[Value]) -> Result<Vec<V
     Ok(result)
 }
 
+/// Check if a row exists. `sql` must be a `SELECT 1 ... LIMIT 1` style query.
+pub fn exists(conn: &Connection, sql: &str, params: &[&dyn rusqlite::types::ToSql]) -> bool {
+    conn.query_row(sql, params, |_| Ok(()))
+        .is_ok()
+}
+
+/// Check if a post is owned by a given user.
+pub fn is_own_post(conn: &Connection, post_id: i64, user_id: i64) -> bool {
+    exists(
+        conn,
+        "SELECT 1 FROM post WHERE post_id = ?1 AND user_id = ?2 LIMIT 1",
+        &[&post_id, &user_id],
+    )
+}
+
+/// Check if a comment is owned by a given user.
+pub fn is_own_comment(conn: &Connection, comment_id: i64, user_id: i64) -> bool {
+    exists(
+        conn,
+        "SELECT 1 FROM comment WHERE comment_id = ?1 AND user_id = ?2 LIMIT 1",
+        &[&comment_id, &user_id],
+    )
+}
+
 /// Record an action in the trace table.
 pub fn record_trace(
     conn: &Connection,

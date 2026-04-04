@@ -2,16 +2,17 @@ use anyhow::Result;
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionMessageToolCall, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
         ChatCompletionRequestUserMessageArgs, ChatCompletionRequestAssistantMessageArgs,
         ChatCompletionToolArgs, ChatCompletionToolType, CreateChatCompletionRequestArgs,
-        FunctionObjectArgs,
+        FunctionCall, FunctionObjectArgs,
     },
     Client,
 };
 use async_trait::async_trait;
 
-use super::{ChatMessage, FunctionTool, LlmBackend, LlmResponse, Role, ToolCall};
+use super::{ChatMessage, FunctionTool, LlmBackend, LlmResponse, ModelConfig, Role, ToolCall};
 
 /// OpenAI-compatible LLM backend using async-openai.
 ///
@@ -20,6 +21,7 @@ use super::{ChatMessage, FunctionTool, LlmBackend, LlmResponse, Role, ToolCall};
 pub struct OpenAIBackend {
     client: Client<OpenAIConfig>,
     model: String,
+    config: ModelConfig,
 }
 
 impl OpenAIBackend {
@@ -28,6 +30,7 @@ impl OpenAIBackend {
         Self {
             client: Client::new(),
             model: model.to_string(),
+            config: ModelConfig::default(),
         }
     }
 
@@ -39,7 +42,28 @@ impl OpenAIBackend {
         Self {
             client: Client::with_config(config),
             model: model.to_string(),
+            config: ModelConfig::default(),
         }
+    }
+
+    /// Create for OpenRouter with model parameters.
+    ///
+    /// OpenRouter uses `https://openrouter.ai/api/v1` as base URL and
+    /// accepts any model identifier (e.g. `anthropic/claude-sonnet-4`,
+    /// `google/gemini-2.5-pro`, `meta-llama/llama-4-maverick`).
+    ///
+    /// Reads `OPENROUTER_API_KEY` env var if `api_key` is not provided.
+    pub fn openrouter(model: &str, api_key: Option<&str>) -> Self {
+        let key = api_key
+            .map(String::from)
+            .unwrap_or_else(|| std::env::var("OPENROUTER_API_KEY").unwrap_or_default());
+        Self::with_base_url(model, "https://openrouter.ai/api/v1", &key)
+    }
+
+    /// Set generation parameters.
+    pub fn with_config(mut self, config: ModelConfig) -> Self {
+        self.config = config;
+        self
     }
 }
 
@@ -64,13 +88,30 @@ impl LlmBackend for OpenAIBackend {
                     .build()
                     .unwrap()
                     .into(),
-                Role::Assistant => ChatCompletionRequestAssistantMessageArgs::default()
+                Role::Assistant => {
+                    let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                    builder.content(msg.content.as_str());
+                    if !msg.tool_calls.is_empty() {
+                        let oai_tool_calls: Vec<ChatCompletionMessageToolCall> = msg
+                            .tool_calls
+                            .iter()
+                            .map(|tc| ChatCompletionMessageToolCall {
+                                id: tc.id.clone(),
+                                r#type: ChatCompletionToolType::Function,
+                                function: FunctionCall {
+                                    name: tc.function_name.clone(),
+                                    arguments: serde_json::to_string(&tc.arguments)
+                                        .unwrap_or_default(),
+                                },
+                            })
+                            .collect();
+                        builder.tool_calls(oai_tool_calls);
+                    }
+                    builder.build().unwrap().into()
+                }
+                Role::Tool => ChatCompletionRequestToolMessageArgs::default()
                     .content(msg.content.as_str())
-                    .build()
-                    .unwrap()
-                    .into(),
-                Role::Tool => ChatCompletionRequestUserMessageArgs::default()
-                    .content(msg.content.as_str())
+                    .tool_call_id(msg.tool_call_id.as_deref().unwrap_or(""))
                     .build()
                     .unwrap()
                     .into(),
@@ -82,6 +123,23 @@ impl LlmBackend for OpenAIBackend {
         request_builder
             .model(&self.model)
             .messages(oai_messages);
+
+        // Apply model config parameters
+        if let Some(temp) = self.config.temperature {
+            request_builder.temperature(temp);
+        }
+        if let Some(max_tok) = self.config.max_tokens {
+            request_builder.max_tokens(max_tok);
+        }
+        if let Some(top_p) = self.config.top_p {
+            request_builder.top_p(top_p);
+        }
+        if let Some(freq) = self.config.frequency_penalty {
+            request_builder.frequency_penalty(freq);
+        }
+        if let Some(pres) = self.config.presence_penalty {
+            request_builder.presence_penalty(pres);
+        }
 
         // Add tools if any
         if !tools.is_empty() {

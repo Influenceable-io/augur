@@ -165,8 +165,27 @@ impl Platform {
         }
     }
 
+    /// Get the current timestamp string.
+    ///
+    /// Return the current (possibly accelerated) time as a `DateTime<Utc>`.
+    ///
+    /// For Reddit mode (k > 1), uses clock.time_transfer() for accelerated simulated time.
+    /// For Twitter mode (k = 1), uses real wall-clock time.
+    ///
+    /// Uses try_read() to avoid holding the clock lock across await points,
+    /// preventing deadlocks when called while the db mutex is held.
+    fn now_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        if let Ok(clock) = self.clock.try_read() {
+            if clock.k > 1 {
+                let now = chrono::Utc::now();
+                return clock.time_transfer(now, clock.real_start_time);
+            }
+        }
+        chrono::Utc::now()
+    }
+
     fn now_str(&self) -> String {
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        self.now_datetime().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     // ========================================================================
@@ -201,17 +220,7 @@ impl Platform {
         };
         let now = self.now_str();
 
-        // Check for duplicate follow
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM follow WHERE follower_id = ?1 AND followee_id = ?2",
-                params![user_id, followee_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM follow WHERE follower_id = ?1 AND followee_id = ?2 LIMIT 1", &[&user_id, &followee_id]) {
             return ActionResult::fail("already following");
         }
 
@@ -277,6 +286,10 @@ impl Platform {
             _ => return ActionResult::fail("agent not found"),
         };
         let now = self.now_str();
+
+        if queries::exists(&db, "SELECT 1 FROM mute WHERE muter_id = ?1 AND mutee_id = ?2 LIMIT 1", &[&user_id, &mutee_id]) {
+            return ActionResult::fail("already muted");
+        }
 
         match db.execute(
             "INSERT INTO mute (muter_id, mutee_id, created_at) VALUES (?1, ?2, ?3)",
@@ -345,17 +358,7 @@ impl Platform {
         };
         let now = self.now_str();
 
-        // Prevent duplicate reposts
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM post WHERE user_id = ?1 AND original_post_id = ?2 AND quote_content IS NULL",
-                params![user_id, post_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM post WHERE user_id = ?1 AND original_post_id = ?2 AND quote_content IS NULL LIMIT 1", &[&user_id, &post_id]) {
             return ActionResult::fail("already reposted");
         }
 
@@ -438,32 +441,11 @@ impl Platform {
         };
         let now = self.now_str();
 
-        // Check self-rating
-        if !self.config.allow_self_rating {
-            let is_own: bool = db
-                .query_row(
-                    "SELECT COUNT(*) FROM post WHERE post_id = ?1 AND user_id = ?2",
-                    params![post_id, user_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-            if is_own {
-                return ActionResult::fail("cannot rate own post");
-            }
+        if !self.config.allow_self_rating && queries::is_own_post(&db, post_id, user_id) {
+            return ActionResult::fail("cannot rate own post");
         }
 
-        // Check duplicate
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM \"like\" WHERE user_id = ?1 AND post_id = ?2",
-                params![user_id, post_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM \"like\" WHERE user_id = ?1 AND post_id = ?2 LIMIT 1", &[&user_id, &post_id]) {
             return ActionResult::fail("already liked");
         }
 
@@ -522,30 +504,11 @@ impl Platform {
         };
         let now = self.now_str();
 
-        if !self.config.allow_self_rating {
-            let is_own: bool = db
-                .query_row(
-                    "SELECT COUNT(*) FROM post WHERE post_id = ?1 AND user_id = ?2",
-                    params![post_id, user_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-            if is_own {
-                return ActionResult::fail("cannot rate own post");
-            }
+        if !self.config.allow_self_rating && queries::is_own_post(&db, post_id, user_id) {
+            return ActionResult::fail("cannot rate own post");
         }
 
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM dislike WHERE user_id = ?1 AND post_id = ?2",
-                params![user_id, post_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM dislike WHERE user_id = ?1 AND post_id = ?2 LIMIT 1", &[&user_id, &post_id]) {
             return ActionResult::fail("already disliked");
         }
 
@@ -608,16 +571,11 @@ impl Platform {
         };
         let now = self.now_str();
 
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM comment_like WHERE user_id = ?1 AND comment_id = ?2",
-                params![user_id, comment_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
+        if !self.config.allow_self_rating && queries::is_own_comment(&db, comment_id, user_id) {
+            return ActionResult::fail("cannot rate own comment");
+        }
 
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM comment_like WHERE user_id = ?1 AND comment_id = ?2 LIMIT 1", &[&user_id, &comment_id]) {
             return ActionResult::fail("already liked");
         }
 
@@ -676,16 +634,11 @@ impl Platform {
         };
         let now = self.now_str();
 
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM comment_dislike WHERE user_id = ?1 AND comment_id = ?2",
-                params![user_id, comment_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
+        if !self.config.allow_self_rating && queries::is_own_comment(&db, comment_id, user_id) {
+            return ActionResult::fail("cannot rate own comment");
+        }
 
-        if exists {
+        if queries::exists(&db, "SELECT 1 FROM comment_dislike WHERE user_id = ?1 AND comment_id = ?2 LIMIT 1", &[&user_id, &comment_id]) {
             return ActionResult::fail("already disliked");
         }
 
@@ -736,6 +689,23 @@ impl Platform {
         }
     }
 
+    /// Apply show_score transformation: replace num_likes/num_dislikes with score.
+    fn apply_show_score(&self, mut posts: Vec<Value>) -> Vec<Value> {
+        if !self.config.show_score {
+            return posts;
+        }
+        for post in &mut posts {
+            if let Some(obj) = post.as_object_mut() {
+                let likes = obj.get("num_likes").and_then(|v| v.as_i64()).unwrap_or(0);
+                let dislikes = obj.get("num_dislikes").and_then(|v| v.as_i64()).unwrap_or(0);
+                obj.remove("num_likes");
+                obj.remove("num_dislikes");
+                obj.insert("score".to_string(), json!(likes - dislikes));
+            }
+        }
+        posts
+    }
+
     // ========================================================================
     // Discovery
     // ========================================================================
@@ -781,7 +751,7 @@ impl Platform {
              ORDER BY p.created_at DESC LIMIT ?2",
         ) {
             Ok(mut stmt) => stmt
-                .query_map(params![user_id, self.config.refresh_rec_post_count], |row| {
+                .query_map(params![user_id, self.config.following_post_count], |row| {
                     Ok(json!({
                         "post_id": row.get::<_, i64>(0)?,
                         "user_id": row.get::<_, i64>(1)?,
@@ -803,9 +773,10 @@ impl Platform {
 
         // Add comments to posts
         let posts_with_comments = queries::add_comments_to_posts(&db, &rec_posts).unwrap_or(rec_posts);
+        let posts_final = self.apply_show_score(posts_with_comments);
 
         let _ = queries::record_trace(&db, user_id, "refresh", "", &now);
-        ActionResult::ok(json!({ "posts": posts_with_comments }))
+        ActionResult::ok(json!({ "posts": posts_final }))
     }
 
     async fn search_posts(&self, agent_id: i64, query: String) -> ActionResult {
@@ -818,8 +789,10 @@ impl Platform {
         let search = format!("%{}%", query);
 
         let posts: Vec<Value> = match db.prepare(
-            "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes \
-             FROM post WHERE content LIKE ?1 OR CAST(post_id AS TEXT) = ?2 OR CAST(user_id AS TEXT) = ?2",
+            "SELECT p.post_id, p.user_id, p.content, p.created_at, p.num_likes, p.num_dislikes \
+             FROM post p LEFT JOIN user u ON p.user_id = u.user_id \
+             WHERE p.content LIKE ?1 OR CAST(p.post_id AS TEXT) = ?2 OR CAST(p.user_id AS TEXT) = ?2 \
+             OR u.user_name LIKE ?1 OR u.bio LIKE ?1",
         ) {
             Ok(mut stmt) => stmt
                 .query_map(params![search, query], |row| {
@@ -837,6 +810,7 @@ impl Platform {
             Err(e) => return ActionResult::fail(&format!("search_posts failed: {}", e)),
         };
 
+        let posts = self.apply_show_score(posts);
         let _ = queries::record_trace(&db, user_id, "search_posts", &query, &now);
         ActionResult::ok(json!({ "posts": posts }))
     }
@@ -852,7 +826,9 @@ impl Platform {
 
         let users: Vec<Value> = match db.prepare(
             "SELECT user_id, user_name, name, bio, created_at, num_followings, num_followers \
-             FROM user WHERE user_name LIKE ?1 OR name LIKE ?1 OR bio LIKE ?1 OR CAST(user_id AS TEXT) = ?2",
+             FROM user WHERE user_name LIKE ?1 OR name LIKE ?1 OR bio LIKE ?1 \
+             OR CAST(user_id AS TEXT) = ?2 OR CAST(agent_id AS TEXT) = ?2 \
+             ORDER BY CASE WHEN CAST(user_id AS TEXT) = ?2 OR CAST(agent_id AS TEXT) = ?2 THEN 0 ELSE 1 END",
         ) {
             Ok(mut stmt) => stmt
                 .query_map(params![search, query], |row| {
@@ -877,29 +853,35 @@ impl Platform {
 
     async fn trend(&self, _agent_id: i64) -> ActionResult {
         let db = self.db.lock().await;
+        let top_k = self.config.trend_top_k;
+        let num_days = self.config.trend_num_days;
 
-        let posts: Vec<Value> = {
-            let mut stmt = db
-                .prepare(
-                    "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes \
-                     FROM post ORDER BY num_likes DESC LIMIT 10",
-                )
-                .unwrap();
-            stmt.query_map([], |row| {
-                Ok(json!({
-                    "post_id": row.get::<_, i64>(0)?,
-                    "user_id": row.get::<_, i64>(1)?,
-                    "content": row.get::<_, String>(2)?,
-                    "created_at": row.get::<_, String>(3)?,
-                    "num_likes": row.get::<_, i64>(4)?,
-                    "num_dislikes": row.get::<_, i64>(5)?,
-                }))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        // Filter to posts within trend_num_days using simulated time (matches OASIS)
+        let cutoff = (self.now_datetime() - chrono::Duration::days(num_days as i64))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        let posts: Vec<Value> = match db.prepare(
+            "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes \
+             FROM post WHERE created_at >= ?1 ORDER BY num_likes DESC LIMIT ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(params![cutoff, top_k], |row| {
+                    Ok(json!({
+                        "post_id": row.get::<_, i64>(0)?,
+                        "user_id": row.get::<_, i64>(1)?,
+                        "content": row.get::<_, String>(2)?,
+                        "created_at": row.get::<_, String>(3)?,
+                        "num_likes": row.get::<_, i64>(4)?,
+                        "num_dislikes": row.get::<_, i64>(5)?,
+                    }))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => return ActionResult::fail(&format!("trend failed: {}", e)),
         };
 
+        let posts = self.apply_show_score(posts);
         ActionResult::ok(json!({ "posts": posts }))
     }
 
@@ -1025,6 +1007,16 @@ impl Platform {
                     "UPDATE post SET num_reports = num_reports + 1 WHERE post_id = ?1",
                     params![post_id],
                 );
+
+                // Auto-delete post if reports meet or exceed threshold (matches OASIS)
+                let deleted = db.execute(
+                    "DELETE FROM post WHERE post_id = ?1 AND num_reports >= ?2",
+                    params![post_id, self.config.report_threshold as i64],
+                ).unwrap_or(0);
+                if deleted > 0 {
+                    tracing::info!(post_id, threshold = self.config.report_threshold, "Post auto-deleted: report threshold exceeded");
+                }
+
                 let _ = queries::record_trace(&db, user_id, "report_post", &format!("{TRACE_LIKE_POST_PREFIX}{post_id}"), &now);
                 ActionResult::ok(json!({ "report_id": report_id }))
             }
@@ -1081,5 +1073,20 @@ impl Platform {
     pub async fn update_rec_table(&self) {
         let db = self.db.lock().await;
         recsys::update_rec_table(&db, self.recsys_type, self.config.max_rec_post_len);
+    }
+
+    /// Register a product on the platform (matches OASIS's sign_up_product).
+    ///
+    /// Called during setup, not as an agent action. Products must be registered
+    /// before agents can use PurchaseProduct.
+    pub async fn sign_up_product(&self, product_id: i64, product_name: &str) -> ActionResult {
+        let db = self.db.lock().await;
+        match db.execute(
+            "INSERT OR IGNORE INTO product (product_id, product_name, sales) VALUES (?1, ?2, 0)",
+            params![product_id, product_name],
+        ) {
+            Ok(_) => ActionResult::ok(json!({ "product_id": product_id })),
+            Err(e) => ActionResult::fail(&format!("sign_up_product failed: {}", e)),
+        }
     }
 }

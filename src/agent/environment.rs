@@ -23,15 +23,23 @@ impl SocialEnvironment {
         "No posts available.".to_string()
     }
 
-    /// Get follower count.
-    pub async fn get_followers_env(&self) -> String {
-        // This queries the platform via search_user for self
-        "".to_string() // Populated during refresh
-    }
-
-    /// Get following count.
-    pub async fn get_follows_env(&self) -> String {
-        "".to_string() // Populated during refresh
+    /// Get follower and following counts via a single platform query.
+    /// Returns (followers_text, follows_text).
+    pub async fn get_social_counts_env(&self) -> (String, String) {
+        let result = self.action.search_user(&self.action.agent_id().to_string()).await;
+        if result.success {
+            if let Some(users) = result.data.get("users").and_then(|v| v.as_array()) {
+                if let Some(user) = users.first() {
+                    let followers = user.get("num_followers").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let followings = user.get("num_followings").and_then(|v| v.as_i64()).unwrap_or(0);
+                    return (
+                        format!("You have {followers} followers."),
+                        format!("You are following {followings} users."),
+                    );
+                }
+            }
+        }
+        (String::new(), String::new())
     }
 
     /// Get group chat messages.
@@ -64,16 +72,12 @@ impl SocialEnvironment {
             }
         }
 
-        if include_followers {
-            let followers = self.get_followers_env().await;
-            if !followers.is_empty() {
+        if include_followers || include_follows {
+            let (followers, follows) = self.get_social_counts_env().await;
+            if include_followers && !followers.is_empty() {
                 parts.push(followers);
             }
-        }
-
-        if include_follows {
-            let follows = self.get_follows_env().await;
-            if !follows.is_empty() {
+            if include_follows && !follows.is_empty() {
                 parts.push(follows);
             }
         }

@@ -1,4 +1,5 @@
 pub mod embeddings;
+pub mod onnx_embedder;
 pub mod random;
 pub mod reddit;
 pub mod twitter;
@@ -39,16 +40,19 @@ pub struct TraceRow {
 
 /// Update the recommendation table using the specified algorithm.
 pub fn update_rec_table(conn: &Connection, recsys_type: RecsysType, max_rec_post_len: usize) {
-    // Fetch data from database
     let user_table = fetch_user_table(conn);
     let post_table = fetch_post_table(conn);
-    let trace_table = fetch_trace_table(conn);
 
     if user_table.is_empty() || post_table.is_empty() {
         return;
     }
 
-    // Compute recommendations: Vec<(user_id, post_id)>
+    // Only fetch trace table for algorithms that use it (TWHiN uses like history)
+    let trace_table = match recsys_type {
+        RecsysType::Twitter | RecsysType::Twhin => fetch_trace_table(conn),
+        _ => Vec::new(),
+    };
+
     let recommendations = match recsys_type {
         RecsysType::Random => random::recommend(&user_table, &post_table, max_rec_post_len),
         RecsysType::Reddit => reddit::recommend(&user_table, &post_table, max_rec_post_len),
@@ -83,7 +87,7 @@ fn fetch_user_table(conn: &Connection) -> Vec<UserRow> {
 
 fn fetch_post_table(conn: &Connection) -> Vec<PostRow> {
     let mut stmt = conn
-        .prepare("SELECT post_id, user_id, COALESCE(content, ''), COALESCE(created_at, ''), num_likes, num_dislikes FROM post")
+        .prepare("SELECT post_id, user_id, COALESCE(content, ''), COALESCE(created_at, ''), num_likes, num_dislikes FROM post ORDER BY post_id")
         .unwrap();
     stmt.query_map([], |row| {
         Ok(PostRow {
@@ -101,8 +105,9 @@ fn fetch_post_table(conn: &Connection) -> Vec<PostRow> {
 }
 
 fn fetch_trace_table(conn: &Connection) -> Vec<TraceRow> {
+    // Only fetch like_post traces — the only action recsys algorithms use.
     let mut stmt = conn
-        .prepare("SELECT user_id, action, COALESCE(info, '') FROM trace")
+        .prepare("SELECT user_id, action, COALESCE(info, '') FROM trace WHERE action = 'like_post'")
         .unwrap();
     stmt.query_map([], |row| {
         Ok(TraceRow {

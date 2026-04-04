@@ -20,6 +20,10 @@ impl SocialAction {
         Self { agent_id, channel }
     }
 
+    pub fn agent_id(&self) -> i64 {
+        self.agent_id
+    }
+
     /// Send an action through the channel and wait for the result.
     pub async fn perform_action(&self, message: Value, action_type: ActionType) -> ActionResult {
         let message_id = self

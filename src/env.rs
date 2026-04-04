@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::agent::action::SocialAction;
 use crate::agent::graph::AgentGraph;
+use crate::agent::SocialAgent;
 use crate::channel::Channel;
 use crate::clock::Clock;
 use crate::env_action::Action;
@@ -86,6 +87,14 @@ impl AugurEnv {
         }));
 
         let graph = self.agent_graph.read().await;
+
+        // Sign up agents and capture agent_id -> user_id mapping.
+        // HashMap iteration order is arbitrary, so SQLite autoincrement user_ids
+        // won't necessarily equal agent_id + 1. We must use the actual user_ids.
+        // Sign up agents, insert previous posts, and capture agent_id -> user_id mapping.
+        // HashMap iteration order is arbitrary, so SQLite autoincrement user_ids
+        // won't necessarily equal agent_id + 1. We must use the actual user_ids.
+        let mut agent_to_user: HashMap<i64, i64> = HashMap::new();
         for (agent_id, agent) in graph.get_agents() {
             let user_name = agent.user_info.user_name.as_deref().unwrap_or("unknown");
             let name = agent.user_info.name.as_deref().unwrap_or("unknown");
@@ -99,26 +108,14 @@ impl AugurEnv {
                     ActionType::SignUp,
                 )
                 .await;
-            let _ = self.channel.read_from_send_queue(msg_id).await;
-        }
+            let (_, _, result) = self.channel.read_from_send_queue(msg_id).await;
+            if let Some(uid) = result.data.get("user_id").and_then(|v| v.as_i64()) {
+                agent_to_user.insert(agent_id, uid);
+            }
 
-        for (from, to) in graph.get_edges() {
-            // In OASIS, followee_id is the user_id (1-indexed autoincrement)
-            let followee_user_id = to + 1;
-            let msg_id = self
-                .channel
-                .write_to_receive_queue(
-                    from,
-                    serde_json::json!(followee_user_id),
-                    ActionType::Follow,
-                )
-                .await;
-            let _ = self.channel.read_from_send_queue(msg_id).await;
-        }
-
-        for (agent_id, agent) in graph.get_agents() {
+            // Insert previous posts from agent profile (combined with sign-up pass)
             if let Some(profile) = &agent.user_info.profile
-                && let Some(tweets_val) = profile.get("previous_tweets")
+                && let Some(tweets_val) = profile.get(crate::agent::PROFILE_KEY_PREVIOUS_TWEETS)
             {
                 let tweets_str = tweets_val.as_str().unwrap_or("");
                 for tweet in tweets_str
@@ -137,6 +134,26 @@ impl AugurEnv {
                     let _ = self.channel.read_from_send_queue(msg_id).await;
                 }
             }
+        }
+
+        // Follow edges must be a separate pass — depends on the complete agent_to_user map.
+        for (from, to) in graph.get_edges() {
+            let followee_user_id = match agent_to_user.get(&to) {
+                Some(&uid) => uid,
+                None => {
+                    tracing::warn!(from, to, "Follow edge target agent not found in user mapping");
+                    continue;
+                }
+            };
+            let msg_id = self
+                .channel
+                .write_to_receive_queue(
+                    from,
+                    serde_json::json!(followee_user_id),
+                    ActionType::Follow,
+                )
+                .await;
+            let _ = self.channel.read_from_send_queue(msg_id).await;
         }
 
         Ok(())
@@ -232,19 +249,41 @@ async fn process_single_action(
         }
         Action::Llm(_) => {
             let _permit = semaphore.acquire().await.unwrap();
-            let mut graph = agent_graph.write().await;
-            if let Some(agent) = graph.get_agent_mut(agent_id) {
+            borrow_agent(agent_graph, agent_id, |mut agent: SocialAgent| async move {
                 agent.perform_action_by_llm().await;
-            }
+                agent
+            }).await;
         }
         Action::Interview { prompt } => {
-            let mut graph = agent_graph.write().await;
-            if let Some(agent) = graph.get_agent_mut(agent_id) {
+            borrow_agent(agent_graph, agent_id, |mut agent: SocialAgent| async move {
                 agent.perform_interview(&prompt).await;
-            }
+                agent
+            }).await;
         }
         Action::Multiple(_) => {
             tracing::warn!("Nested Multiple actions not supported");
         }
     }
+}
+
+/// Take an agent out of the graph, run an async operation on it, then return it.
+/// Releases the graph write lock during the operation so other agents can run concurrently.
+async fn borrow_agent<F, Fut>(
+    agent_graph: &RwLock<AgentGraph>,
+    agent_id: i64,
+    f: F,
+) where
+    F: FnOnce(SocialAgent) -> Fut,
+    Fut: std::future::Future<Output = SocialAgent>,
+{
+    let agent = {
+        let mut graph = agent_graph.write().await;
+        match graph.take_agent(agent_id) {
+            Some(a) => a,
+            None => return,
+        }
+    };
+    let agent = f(agent).await;
+    let mut graph = agent_graph.write().await;
+    graph.add_agent(agent_id, agent);
 }
